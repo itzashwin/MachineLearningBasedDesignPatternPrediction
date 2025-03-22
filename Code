@@ -1,0 +1,271 @@
+import os
+import pandas as pd
+import seaborn as sns
+import matplotlib
+matplotlib.use('Agg')  # Use non-GUI backend to avoid Tkinter errors
+import matplotlib.pyplot as plt
+
+from django.shortcuts import render, redirect
+from django.core.files.storage import FileSystemStorage
+from django.contrib.auth.hashers import check_password, make_password
+from .forms import RegisterForm, LoginForm
+from .models import User
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.svm import SVC
+from sklearn.neural_network import MLPClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, confusion_matrix
+
+# Define Machine Learning Models
+models = {
+    "Logistic Regression": LogisticRegression(max_iter=500),
+    "Support Vector Machine": SVC(kernel='linear'),
+    "Neural Network": MLPClassifier(hidden_layer_sizes=(50,), max_iter=200, random_state=42)
+}
+
+# Store model accuracies for final bar chart
+model_accuracies = {}
+#
+# def register(request):
+#     if request.method == 'POST':
+#         form = RegisterForm(request.POST)
+#         if form.is_valid():
+#             user = form.save(commit=False)
+#             user.password = make_password(user.password)  # Hash the password before saving
+#             user.save()  # Save the user object (user_id will be auto-generated)
+#             return redirect('login')  # Redirect to login page after successful registration
+#     else:
+#         form = RegisterForm()
+#     return render(request, 'register.html', {'form': form})
+# # In your views.py
+#
+# def register(request):
+#     if request.method == 'POST':
+#         form = RegisterForm(request.POST)
+#         if form.is_valid():
+#             user = form.save(commit=False)
+#             user.password = make_password(user.password)
+#             user.save()  # Save the user, user_id will be generated automatically
+#             return redirect('registration_success')
+#     else:
+#         form = RegisterForm()
+#     return render(request, 'register.html', {'form': form})
+
+from django.contrib import messages  # Import messages for success notifications
+
+def register(request):
+    if request.method == 'POST':
+        form = RegisterForm(request.POST)
+        if form.is_valid():
+            user = form.save(commit=False)
+            user.password = make_password(user.password)
+            user.save()
+            messages.success(request, "Registration successful! Please log in.")  # Success message
+            return redirect('login')  # Redirect to login page
+    else:
+        form = RegisterForm()
+
+    return render(request, 'register.html', {'form': form})
+
+
+
+
+def registration_success(request):
+    return render(request, 'registration_success.html')
+
+
+
+
+def login(request):
+    if request.method == 'POST':
+        form = LoginForm(request.POST)
+        if form.is_valid():
+            email = form.cleaned_data['email']
+            password = form.cleaned_data['password']
+            try:
+                user = User.objects.get(email=email)
+                if check_password(password, user.password):
+                    return redirect('upload')
+                else:
+                    return render(request, 'login.html', {'form': form, 'error': 'Invalid password'})
+            except User.DoesNotExist:
+                return render(request, 'login.html', {'form': form, 'error': 'User not found'})
+    else:
+        form = LoginForm()
+    return render(request, 'login.html', {'form': form})
+
+def logout(request):
+    request.session.flush()  # Clear session
+    return redirect('login')
+
+def index(request):
+    return render(request, 'index.html')
+
+def upload_file(request):
+    """Handles CSV Upload and Shows the First 20 Records"""
+    if request.method == 'POST' and request.FILES.get('dataset'):
+        dataset = request.FILES['dataset']
+        fs = FileSystemStorage(location="media/")
+        file_path = fs.save(dataset.name, dataset)
+        request.session['file_path'] = file_path  # Save file path for later use
+
+        # Load dataset and display first 20 records
+        df = pd.read_csv(f"media/{file_path}")
+        first_20_records = df.head(20).to_html(index=False)  # Convert first 20 records to HTML
+
+        return render(request, 'upload.html', {
+            'first_20_records': first_20_records
+        })
+
+    return render(request, 'upload.html')
+
+def show_first_20_records(request):
+    """Show the First 20 Records"""
+    file_path = request.session.get('file_path', None)
+    if not file_path:
+        return redirect('upload')
+
+    # Load dataset
+    df = pd.read_csv(f"media/{file_path}")
+    first_20_records = df.head(20).to_html(index=False)
+
+    return render(request, 'upload.html', {
+        'first_20_records': first_20_records
+    })
+
+def algorithm_results(request, algo_name):
+    """Processes and Displays Results for One Algorithm at a Time"""
+    file_path = request.session.get('file_path', None)
+
+    if not file_path:
+        return redirect('upload')
+
+    # Load dataset
+    df = pd.read_csv(f"media/{file_path}")
+
+    if "Design Pattern" not in df.columns:
+        return render(request, 'upload.html', {'error': "Dataset must have 'Design Pattern' column!"})
+
+    # Prepare Data
+    X = df.drop(columns=["Design Pattern"])
+    y = df["Design Pattern"]
+
+    # Convert categorical features to numerical
+    label_encoders = {}
+    for col in X.select_dtypes(include=['object']).columns:
+        label_encoders[col] = LabelEncoder()
+        X[col] = label_encoders[col].fit_transform(X[col])
+
+    # Convert target variable (Design Pattern) to numeric if needed
+    if y.dtype == 'object':
+        y = LabelEncoder().fit_transform(y)
+
+    # Split Data
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+
+    # Train the selected model
+    model = models.get(algo_name)
+    if not model:
+        return redirect('upload')
+
+    model.fit(X_train_scaled, y_train)
+    y_pred = model.predict(X_test_scaled)
+    accuracy = accuracy_score(y_test, y_pred) * 100  # Convert to percentage
+    model_accuracies[algo_name] = accuracy  # Store accuracy
+
+    # Generate Confusion Matrix Graph
+    conf_matrix = confusion_matrix(y_test, y_pred)
+    os.makedirs("static/confusion_matrices", exist_ok=True)
+    conf_matrix_path = f"static/confusion_matrices/{algo_name}_conf_matrix.png"
+
+    plt.figure(figsize=(5, 4))
+    sns.heatmap(conf_matrix, annot=True, fmt="d", cmap="Blues")
+    plt.xlabel("Predicted")
+    plt.ylabel("Actual")
+    plt.title(f"{algo_name} Confusion Matrix")
+    plt.savefig(conf_matrix_path)
+    plt.close()
+
+    # Generate Bar Chart at the End
+    if algo_name == "Neural Network":  # Last model in the list
+        os.makedirs("static/bar_charts", exist_ok=True)
+        bar_chart_path = "static/bar_charts/model_accuracies.png"
+
+        plt.figure(figsize=(6, 4))
+        plt.bar(model_accuracies.keys(), model_accuracies.values(), color=['blue', 'green', 'red'])
+        plt.xlabel("Algorithms")
+        plt.ylabel("Accuracy (%)")
+        plt.title("Comparison of Model Accuracies")
+        plt.ylim(0, 100)
+        plt.savefig(bar_chart_path)
+        plt.close()
+    else:
+        bar_chart_path = None  # Don't generate until the last model is reached
+
+    # Prepare Navigation Links
+    model_names = list(models.keys())
+    current_index = model_names.index(algo_name)
+    prev_algo = model_names[current_index - 1] if current_index > 0 else None
+    next_algo = model_names[current_index + 1] if current_index < len(model_names) - 1 else None
+
+    return render(request, 'results.html', {
+        "algo_name": algo_name,
+        "accuracy": round(accuracy, 2),
+        "conf_matrix_img": "/" + conf_matrix_path,  # To display in template
+        # "bar_chart_img": "/" + bar_chart_path if bar_chart_path else None,
+        # "prev_algo": prev_algo,
+        # "next_algo": next_algo
+    })
+
+from django.shortcuts import render
+
+def show_all_algorithms(request):
+    return render(request, 'show_all_algorithms.html')  # Correct template name
+
+def logistic_regression_results(request):
+    return algorithm_results(request, "Logistic Regression")
+
+def svm_results(request):
+    return algorithm_results(request, "Support Vector Machine")
+
+def neural_network_results(request):
+    return algorithm_results(request, "Neural Network")
+
+
+from django.shortcuts import render
+
+from django.shortcuts import render
+
+def graph_comparison(request):
+    """Displays the bar chart comparing model accuracies."""
+    bar_chart_path = "/static/bar_charts/model_accuracies.png"  # Ensure the image is generated
+    return render(request, 'graph_comparison.html', {"bar_chart_img": bar_chart_path})
+
+
+def display_accuracy_comparison(request):
+    """Displays accuracy of all models"""
+    return render(request, 'accuracy_comparison.html', {"model_accuracies": model_accuracies})
+
+from django.shortcuts import render
+
+def accuracy_comparison(request):
+    """Displays the accuracies of all models and highlights the highest one."""
+    global model_accuracies
+
+    if not model_accuracies:  # Ensure accuracies exist before displaying
+        return render(request, 'accuracy_comparison.html', {"error": "Run all algorithms first to see comparisons."})
+
+    # Find the highest accuracy model
+    best_model = max(model_accuracies, key=model_accuracies.get)
+    best_accuracy = model_accuracies[best_model]
+
+    return render(request, 'accuracy_comparison.html', {
+        "accuracies": model_accuracies,
+        "best_model": best_model,
+        "best_accuracy": round(best_accuracy, 2)
+    })
+
